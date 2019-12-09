@@ -17,13 +17,15 @@ H_pseudo_inv = np.array([[-1/(l+w), 1/(l+w), 1/(l+w), -1/(l+w)],
                          [1, 1, 1, 1],
                          [-1, 1, -1, 1]])
 zero_row4 = np.array([[0, 0, 0, 0]])
-F6 = np.vstack((zero_row4, zero_row4, H_pseudo_inv, zero_row4))
+F6 = (r/4)*np.vstack((zero_row4, zero_row4, H_pseudo_inv, zero_row4))
 #print(F6)
 
 #initialize error integral
 err_integral = 0
-#initialize configurations list
+#initialize configurations list for trajectory generator
 configs = []
+#initialize list for geometric configurations
+results = []
 
 #body-frame screw axes, arm joints
 arm_screws = np.array([[0, 0, 1, 0, 0.033, 0],
@@ -49,6 +51,10 @@ T_b0 = np.array([[1, 0, 0, 0.1662],
 
 #turn se(3) matrix into configuration vector
 def create_trajectory_vector(config, grip_state):
+    """
+    config = configuration in SE(3) form
+    grip_state = gripper state; open = 0, closed = 1
+    """
     traj_i = []                                                             #empty list
     traj_i[0:3] = config[0, 0:3]                                            #rotational values
     traj_i[3:6] = config[1, 0:3]
@@ -58,6 +64,11 @@ def create_trajectory_vector(config, grip_state):
 
 #trajectory generator function
 def TrajectoryGenerator(trajectory_times, endpoints, hz):
+    """
+    trajectory_times = time length of each trajectory segment
+    endpoints = start/end points of each trajectory segment
+    hz = configurations per second
+    """
     trajpts = []                                #empty list to hold configurations
     for i in range(len(trajectory_times)):      #determine type of each trajectory
         traj_start = endpoints[i]               #trajectory start
@@ -120,4 +131,62 @@ traj_endpoints = [t1_start, t1_end, t2_end, t3_end, t4_end, t5_end, t6_end, t7_e
 
 traj_pts = TrajectoryGenerator(traj_times, traj_endpoints, k)
 
-pprint(traj_pts)
+#pprint(traj_pts)
+
+def NextState(current_config, controls, dt, max_speeds, gripper):
+    """
+    current_config = robot geometric configuration
+        Chassis angle, chassis x, chassis y, J1, J2, J3, J4, J5, W1, W2, W3, W4, Gripper
+        J* = angle of joint *
+        W* = angle of wheel *
+        Gripper = gripper state (open/closed)
+    controls = joint speeds
+        Arm joint speeds (thetadot)
+        Wheel speeds (u)
+    dt = timestep
+    max_speeds = maximum wheel/arm joint speeds
+    """
+    phi, x, y, j1, j2, j3, j4, j5, w1, w2, w3, w4, grip = current_config[0]     #extract current config
+    j1d, j2d, j3d, j4d, j5d, w1d, w2d, w3d, w4d = controls[0]                        #extract joint controls
+    T_chassis = np.array([[math.cos(phi), -math.sin(phi), 0, x],                #transform to chassis frame
+                          [math.sin(phi), math.cos(phi), 0, y],
+                          [0, 0, 1, 0.0963],
+                          [0, 0, 0, 1]])
+    dtheta = np.array([[w1d],                               #change in wheel angles
+                       [w2d],
+                       [w3d],
+                       [w4d]])*dt
+    V_b = np.dot(H_pseudo_inv, dtheta)*(r/4)                #chassis body twist in plane
+    V_b6 = np.array([[0, 0, V_b[0], V_b[1], V_b[2], 0]]).T  #body twist 6-vector
+    T_bb = mr.MatrixExp6(mr.VecTose3(V_b6))                 #chassis displacement (chassis frame)
+    T_b = np.dot(T_chassis, T_bb)                           #chassis displacement (world frame)
+
+    phid = math.acos(T_b[0][0])                 #change in phi
+    xd = T_b[0][3]                              #change in x
+    yd = T_b[0][3]                              #change in y
+
+    #update joint angles
+    j1_d = j1 + j1d*dt
+    j2_d = j2 + j2d*dt
+    j3_d = j3 + j3d*dt
+    j4_d = j4 + j4d*dt
+    j5_d = j5 + j5d*dt
+
+    #update wheel angles
+    w1_d = w1 + w1d*dt
+    w2_d = w2 + w2d*dt
+    w3_d = w3 + w3d*dt
+    w4_d = w4 + w4d*dt
+
+    #add new configuration to list
+    results.append([phid, xd, yd, j1_d, j2_d, j3_d, j4_d, j5_d, w1_d, w2_d, w3_d, w4_d, gripper])
+
+    return phid, xd, yd, j1_d, j2_d, j3_d, j4_d, j5_d, w1_d, w2_d, w3_d, w4_d, gripper
+
+"""
+def main():
+
+
+if __name__ == '__main__':
+    main()
+"""
