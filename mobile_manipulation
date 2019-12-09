@@ -1,297 +1,45 @@
 #!/usr/bin/env python
 
+#necessary imports
 from __future__ import print_function
-import csv
-import math
-import numpy as np
 import modern_robotics as mr
-from pprint import pprint
+import numpy as np
+import math
 
-#function creates list to be written to .csv from se(3) configuration matrix
-def create_trajectory_vector(config, grip_state):
-    traj_i = []                                                 #empty list
-    traj_i[0:3] = config[0, 0:3]                                #rotational values
-    traj_i[3:6] = config[1, 0:3]
-    traj_i[6:9] = config[2, 0:3]
-    traj_i.extend([config[0, 3], config[1, 3], config[2, 3],    #translational values + grip state
-                   grip_state])
-    return traj_i
+#robot geometry
+l = 0.47/2
+w = 0.3/2
+r = 0.0475
 
-def config_to_se3(config):
-    Tsb = np.array([[math.cos(config[0]), -math.sin(config[0]), 0, config[1]],  #chassis frame
-                    [math.sin(config[0]), math.cos(config[0]), 0, config[2]],
-                    [0, 0, 1, 0.0963],
-                    [0, 0, 0, 1]])
-    Ts0 = np.dot(Tsb, T_b0)                                 #arm base frame
-    T0e = mr.FKinBody(M_0e, arm_screws, config[3:8])        #e-e forward kinematics
-    Tse = np.dot(Ts0, T0e)                                  #e-e frame
+#h matrix
+H_pseudo_inv = np.array([[-1/(l+w), 1/(l+w), 1/(l+w), -1/(l+w)],
+                         [1, 1, 1, 1],
+                         [-1, 1, -1, 1]])
+zero_row4 = np.array([[0, 0, 0, 0]])
+F6 = np.vstack((zero_row4, zero_row4, H_pseudo_inv, zero_row4))
+#print(F6)
 
-    return Tse
+#initialize error integral
+err_integral = 0
 
-#function generates the end-effector reference trajectory
-#arguments: (trajectory times [1x8], trajectory endpoints [1x8], configurations/second [scalar])
-def TrajectoryGenerator(trajectory_times, endpoints, hz):
-    trajpts = []                                #empty list to hold configurations
-    for i in range(len(trajectory_times)):      #create all trajectories
-        traj_start = endpoints[i]               #trajectory start
-        traj_end = endpoints[i+1]               #trajectory end
-
-        #create cartesian trajectory
-        traj_i = mr.CartesianTrajectory(traj_start, traj_end, trajectory_times[i],
-                                        trajectory_times[i]*hz, 5)
-                                        #MULTIPLY BY HZ HERE^
-        if 2 <= i <= 5:                         #set grip state to closed for 'holding' trajectories
-            append = 1
-        else:                                   #set grip state to open for others
-            append = 0
-
-        for j in range(len(traj_i)):            #create trajectory vectors
-            t_j = (traj_i[j], append)#create_trajectory_vector(traj_i[j], append)
-            trajpts.append(t_j)                 #list of lists
-
-    return trajpts
-
-#function to determine robot's next configuration
-#arguments: (geometric configuration (1x13), wheel velocities (1x4), arm joint velocities (1x5),
-#            timestep (scalar), wheel speed limits (1x2), arm joint speed limits(1x2))
-def NextState(config, wheelspeeds, armspeeds, dt, wheel_lims, arm_lims):
-    chassis_config = config[0:3]                #isolate chassis configuration
-    arm_config = config[3:8]                    #isolate arm configuration
-    wheels_config = config[8:12]                #isolate wheel configurations
-
-    #check if wheel speeds are outside defined limits
-    for i in range(len(wheelspeeds)):           #for all wheels
-        if wheelspeeds[i] < wheel_lims[0]:      #if wheel speed is below lower limit
-            wheelspeeds[i] = wheel_lims[0]      #set equal to lower limit
-        elif wheelspeeds[i] > wheel_lims[1]:    #if wheel speed is above upper limit
-            wheelspeeds[i] = wheel_lims[1]      #set equal to upper limit
-
-    #check if arm joint speeds are outside defined limits
-    for i in range(len(armspeeds)):             #for all arm joints
-        if armspeeds[i] < arm_lims[0]:          #if arm joint speed is below lower limit
-            armspeeds[i] = arm_lims[0]          #set equal to lower limit
-        elif armspeeds[i] > arm_lims[1]:        #if arm joint speed is above upper limit
-            armspeeds[i] = arm_lims[1]          #set equal to upper limit
-
-    #new arm joint configurations
-    arm_config = [arm_config[0] + armspeeds[0]*dt,
-                  arm_config[1] + armspeeds[1]*dt,
-                  arm_config[2] + armspeeds[2]*dt,
-                  arm_config[3] + armspeeds[3]*dt]
-
-    #new wheel configurations
-    wheels_config = [wheels_config[0] + wheelspeeds[0]*dt,
-                     wheels_config[1] + wheelspeeds[1]*dt,
-                     wheels_config[2] + wheelspeeds[2]*dt,
-                     wheels_config[3] + wheelspeeds[3]*dt]
-    print('new wheel config:\n', wheels_config)
-
-    #odometry
-    dtheta = np.zeros(len(wheels_config))           #placeholder zeros vector for wheel rotations
-    for i in range(len(wheelspeeds)):               #for each wheel
-        dtheta[i] = wheelspeeds[i]*dt               #calculate change in wheel angle
-
-    V_b = (r_wheel/4)*np.dot(F, dtheta)             #calculate body twist
-
-    #determine coordinate change in body frame
-    if abs(V_b[0]) <= 1e-5:                                 #if angular velocity is zero
-        delta_qb = V_b                              #coordinate change equal to body twist
-    elif abs(V_b[0]) >= 1e-5:                               #if angular velocity non-zero
-        delta_qb = []                 #placeholder zeros vector
-        delta_qb.append(V_b[0])                     #angular change equal to angular velocity
-        delta_qb.append((V_b[1]*math.sin(V_b[0])+V_b[2]*(math.cos(V_b[0]-1)))/V_b[0])   #x change
-        delta_qb.append((V_b[2]*math.sin(V_b[0])+V_b[1]*(1-math.cos(V_b[0])))/V_b[0])   #y change
-
-    #transform coordinate change to fixed frame
-    #rotation matrix from world to body frame = rotation around z-axis
-    rot_mat = np.array([[1, 0, 0],
-                        [0, math.cos(chassis_config[0]), -math.sin(chassis_config[0])],
-                        [0, math.sin(chassis_config[0]), math.cos(chassis_config[0])]])
-    delta_q = np.dot(rot_mat, delta_qb)         #world frame coordinate change
-
-    #update chassis configuration
-    chassis_config = np.add(chassis_config, delta_q)
-
-    #update robot configuration
-    next_config = np.hstack((chassis_config, arm_config))
-    next_config = np.hstack((next_config, wheels_config))
-    config_list = next_config.tolist()              #convert configuration vector to list
-    config_list.append(0)                   #add zero to configuration (gripper state = open)
-
-    return config_list              #output configuration
-
-#function returns end-effector twist
-#arguments: (current e-e config [se(3)], reference e-e config [se(3)],
-#            next reference e-e config [se(3)], Kp [6x6], Ki [6x6], dt [scalar])
-def FeedbackControl(T_se, T_se_d, T_se_next, K_prop, K_int, timestep):
-    #inverse of current end-effector configuration
-    x_inv = mr.TransInv(T_se)
-    #inverse of desired configuration
-    xd_inv = mr.TransInv(T_se_d)
-    #calculate twist V_d moving from Xd to Xd_next
-    v_d = mr.se3ToVec((1.0/timestep)*mr.MatrixLog6(np.dot(xd_inv, T_se_next)))
-    #print(v_d)
-    #adjoint of X_inverse*Xd
-    ad_xinv_xd = mr.Adjoint(np.dot(x_inv, T_se_d))
-    #product of adjoint and twist V_d
-    adv_d = np.dot(ad_xinv_xd, v_d)
-    #error se(3) matrix from X to Xd
-    x_err = mr.MatrixLog6(np.dot(x_inv, T_se_d))
-    #error twist from X to Xd
-    x_err_twist = mr.se3ToVec(x_err)
-    #output end-effector twist
-    v_t = adv_d + np.dot(K_prop, x_err_twist) + np.dot(K_int, timestep*x_err_twist)
-    return v_t
-
-#function returns pseudoinverse of combined wheels-arm body jacobian
-#arguments: (configuration)
-def JacobianPseudoinverse(config):
-    #arm forward kinematics
-    #CHANGE 3RD ARGUMENT TO BE ARM JOINT ANGLES AT CURRENT CONFIGURATION (I.E. DIFFERENT INDICES)
-    t_0e = mr.FKinBody(M_0e, arm_screws, config[3:8])
-    #inverse of arm forward kinematics
-    t_0e_inv = mr.TransInv(t_0e)
-    #adjoint of product of inverses
-    ad_t0einv_tb0inv = mr.Adjoint(np.dot(t_0e_inv, T_b0_inv))
-    #base body jacobian
-    j_base = np.dot(ad_t0einv_tb0inv, F6)
-    #arm body jacobian
-    j_arm = mr.JacobianBody(arm_screws, robot[3:8])
-    #total jacobian
-    j_e = np.hstack((j_base, j_arm))
-    #jacobian pseudoinverse
-    j_e_psinv = np.linalg.pinv(j_e, 1e-3)
-    return j_e_psinv
-
-#robot geometric variables
-r_wheel = 0.0475            #mecanum wheel radius
-w = 0.3/2                   #wheelbase width
-l = 0.47/2                  #body length
-
-#time variables
-k = 100                                             #configurations/second
-dt = 0.01                                            #timestep = 1/k
-traj_times = [5, 1, 1, 1, 5, 1, 1, 1]     #trajectory segment times (seconds)
-
-#initial end-effector reference configuration
-T_se = np.array([[1, 0, 0, 0],
-                 [0, 1, 0, 0],
-                 [0, 0, 1, 0.5],
-                 [0, 0, 0, 1]])
-
-#cube configurations
-#IN WORLD FRAME
-T_cube_i = np.array([[1, 0, 0, 1],          #initial cube configuration
-                     [0, 1, 0, 0],
-                     [0, 0, 1, 0.025],
-                     [0, 0, 0, 1]])
-
-T_cube_f = np.array([[0, 1, 0, 0],          #final cube configuration
-                     [-1, 0, 0, -1],
-                     [0, 0, 1, 0.025],
-                     [0, 0, 0, 1]])
-
-#accessory configurations
-#IN CUBE FRAME
-T_grasp = np.array([[0, 0, 1, 0],           #transformation from cube:e-e when grasping
-                    [0, 1, 0, 0],
-                    [-1, 0, 0, 0],
-                    [0, 0, 0, 1]])
-
-T_standoff = np.array([[0, 0, 1, 0],        #transformation from cube:e-e at standoff
-                       [0, 1, 0, 0],
-                       [-1, 0, 0, 0.05],
-                       [0, 0, 0, 1]])
-
-#trajectory endpoints
-t1_start = T_se                                   #segment 1 start (initial config)
-t1_end = T_cube_i.dot(T_standoff)                 #segment 1 endpoint (initial standoff)
-t2_end = T_cube_i.dot(T_grasp)                    #segment 2 endpoint (grab cube position)
-t3_end = t2_end                                   #segment 3 endpoint (grab cube position)
-t4_end = t1_end                                   #segment 4 endpoint (initial standoff)
-t5_end = T_cube_f.dot(T_standoff)                 #segment 5 endpoint (final standoff)
-t6_end = T_cube_f.dot(T_grasp)                    #segment 6 endpoint (release cube position)
-t7_end = t6_end                                   #segment 7 endpoint (release cube position)
-t8_end = t5_end                                   #segment 8 endpoint (final standoff)
-#create list
-traj_endpoints = [t1_start, t1_end, t2_end, t3_end, t4_end, t5_end, t6_end, t7_end, t8_end]
-
-Kp = np.zeros((6, 6))       #proportional gain matrix
-Ki = np.zeros((6, 6))       #integral gain matrix
-
-#offset of base frame from frame directly under it
-T_up = np.array([[1, 0, 0, 0],
-                 [0, 1, 0, 0],
-                 [0, 0, 1, 0.0963],
-                 [0, 0, 0, 1]])
-
-#offset of arm from base frame
-T_b0 = np.array([[1, 0, 0, 0.1662],
-                 [0, 1, 0, 0],
-                 [0, 0, 1, 0.0026],
-                 [0, 0, 0, 1]])
-#inverse
-T_b0_inv = mr.TransInv(T_b0)
-
-#end-effector home configuration
-M_0e = np.array([[1, 0, 0, 0.033],
-                 [0, 1, 0, 0],
-                 [0, 0, 1, 0.6546],
-                 [0, 0, 0, 1]])
-
-#body-frame screw axes for arm
+#body-frame screw axes, arm joints
 arm_screws = np.array([[0, 0, 1, 0, 0.033, 0],
                        [0, -1, 0, -0.5076, 0, 0],
                        [0, -1, 0, -0.3526, 0, 0],
                        [0, -1, 0, -0.2176, 0, 0],
                        [0, 0, 1, 0, 0, 0]]).T
+#print(arm_screws)
 
-#6x4 matrix for jacobian calculation
-#pseudoinverse of chassis velocity:wheel velocity mapping matrix
-F = (r_wheel/4)*np.array([[-1/(l+w), 1/(l+w), 1/(l+w), -1/(l+w)],
-                          [1, 1, 1, 1],
-                          [-1, 1, -1, 1]])
-m0 = np.array([0, 0, 0, 0])
-F6 = np.vstack((m0, m0, F, m0))
+#end effector home configuration
+M_0e = np.array([[1, 0, 0, 0.033],
+                 [0, 1, 0, 0],
+                 [0, 0, 1, 0.6546],
+                 [0, 0, 0, 1]])
+#print(M_0e)
 
-#generate trajectory
-traj = TrajectoryGenerator(traj_times, traj_endpoints, k)
-#pprint(traj)
-
-#set joint speed limits
-wheel_max = 5                           #max wheel speed
-arm_max = 5                             #max arm joint speed
-wheel_lims = [-wheel_max, wheel_max]    #limits on wheel speeds
-arm_lims = [-arm_max, arm_max]          #limits on arm joint speeds
-
-integral = 0                                        #initial value of error integral
-robot = [0, 0, 0, 0, 0, 0, 0.2, -1.6, 0, 0, 0, 0, 0]     #initial geometric conditions
-with open('manipulation.csv', mode='w+') as config_file:
-    config_writer = csv.writer(config_file, delimiter=',')
-    config_writer.writerow(robot)
-    for a in range(len(traj)-1):            #len(traj)-1
-        #print('iteration {}'.format(a+1))
-        X = config_to_se3(robot)
-        #print('current config:\n', X)
-
-        X_d = traj[a][0]                                            #reference se(3)
-
-        X_d_next = traj[a+1][0]
-
-        J_pseudo_curr = JacobianPseudoinverse(robot)                #current jacobian pseudoinverse
-
-        V_ee = FeedbackControl(X, X_d, X_d_next, Kp, Ki, dt)
-        #print('twist:\n ', V_ee)
-
-        velocities = np.dot(J_pseudo_curr, V_ee)
-        #print('wheel velocities: ', velocities[0:4])
-        #print('arm velocities: ', velocities[-5:])
-
-        #print('velocities:\n', velocities)
-
-        wheel_vels = velocities[0:4]
-        arm_vels = velocities[-5:]
-        robot = NextState(robot, wheel_vels, arm_vels, dt, wheel_lims, arm_lims)
-        robot.append(traj[a][1])
-        #print(robot)
-        config_writer.writerow(robot)
+#arm base frame in chassis frame
+T_b0 = np.array([[1, 0, 0, 0.1662],
+                 [0, 1, 0, 0],
+                 [0, 0, 1, 0.0026],
+                 [0, 0, 0, 1]])
+#print(T_b0)
