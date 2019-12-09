@@ -2,9 +2,9 @@
 
 #necessary imports
 from __future__ import print_function
-import modern_robotics as mr
-import numpy as np
 import math
+import numpy as np
+import modern_robotics as mr
 from pprint import pprint
 
 #robot geometry
@@ -113,8 +113,8 @@ T_standoff = np.array([[0, 0, 1, 0],    #transformation from cube:E-E at standof
                        [-1, 0, 0, 0.05],
                        [0, 0, 0, 1]])
 
-k = 100                                     #configurations per second
-traj_times = [5, 1, 1, 1, 5, 1, 1, 1]       #trajectory segment times (seconds)
+k = 100                                         #configurations per second
+traj_times = [5, 1, 1, 1, 5, 1, 1, 1]           #trajectory segment times (seconds)
 
 #trajectory endpoints
 t1_start = T_se                                 #segment 1 start (initial config)
@@ -129,6 +129,7 @@ t8_end = t5_end                                 #segment 8 endpoint (final stand
 #create list
 traj_endpoints = [t1_start, t1_end, t2_end, t3_end, t4_end, t5_end, t6_end, t7_end, t8_end]
 
+#generate reference trajectory
 traj_pts = TrajectoryGenerator(traj_times, traj_endpoints, k)
 
 #pprint(traj_pts)
@@ -184,7 +185,7 @@ def NextState(current_config, controls, dt, max_speeds, gripper):
     return phid, xd, yd, j1_d, j2_d, j3_d, j4_d, j5_d, w1_d, w2_d, w3_d, w4_d, gripper
 
 #returns jacobians based on current configuration
-def get_Jacobian(phi, x, y, j1, j2, j3, j4, j5):
+def GetCurrent(phi, x, y, j1, j2, j3, j4, j5):
     """
     phi = chassis angle
     x = chassis x
@@ -192,10 +193,12 @@ def get_Jacobian(phi, x, y, j1, j2, j3, j4, j5):
     j* = angle of arm joint *
     """
     theta_list = np.array([j1, j2, j3, j4, j5])                     #list of arm joint angles
+
     T_chassis = np.array([[math.cos(phi), -math.sin(phi), 0, x],    #se(3) of chassis configuration
                           [math.sin(phi), math.cos(phi), 0, y],
                           [0, 0, 1, 0.0963],
                           [0, 0, 0, 1]])
+
     J_arm = mr.JacobianBody(arm_screws, theta_list)                     #body jacobian of arm
 
     T_0e = mr.FKinBody(M_0e, arm_screws, theta_list)                    #end-effector se(3) at current joint angles
@@ -205,6 +208,39 @@ def get_Jacobian(phi, x, y, j1, j2, j3, j4, j5):
     J_body = np.dot(mr.Adjoint(np.dot(np.linalg.inv(T_0e),T_b0)), F6)   #chassis body jacobian
 
     return X, J_arm, J_body
+
+def FeedbackControl(X, X_d, X_d_next, K_p, K_i, dt, J_a, J_b):
+    """
+    X = current end-effector configuration in world frame
+    X_d = current end-effector reference configuration
+    X_d_next = next end-effector reference configuration
+    K_p = proportional gain matrix
+    K_i = integrative gain matrix
+    dt = timestep
+    J_a = arm body Jacobian
+    J_b = chassis body Jacobian
+    """
+    global err_integral
+
+    V_d = mr.se3ToVec(mr.MatrixLog6(np.dot(np.linalg.inv(X_d), X_d_next))/dt)   #feedforward twist Vd
+
+    first_term = np.dot(mr.Adjoint(np.dot(np.linalg.inv(X), X_d)),V_d)          #control integral first term
+
+    X_err = mr.se3ToVec(mr.MatrixLog6(np.dot(np.linalg.inv(X), X_d)))           #error twist
+
+    second_term = np.dot(K_p, X_err)                                            #control integral second term
+
+    err_integral += X_err*dt                                                    #update error integral
+
+    third_term = np.dot(K_i, err_integral)                                      #control integral third term
+
+    V_t = first_term + second_term + third_term                                 #end-effector twist V(t)
+
+    J_e = np.hstack((J_b, J_a))                                                 #combined jacobian
+
+    V = np.dot(np.linalg.pinv(J_e, 1e-4), V_t)                                  #joint command velocities
+
+    return V, X_err
 
 """
 def main():
