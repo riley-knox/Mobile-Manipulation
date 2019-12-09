@@ -1,0 +1,98 @@
+#!/usr/bin/env python
+
+#necessary imports
+from __future__ import print_function
+import csv
+import numpy as np
+
+#set joint speed limits
+wheel_max = 5                         #max wheel speed
+arm_max = 5                           #max arm joint speed
+wheel_lims = [-wheel_max, wheel_max]    #limits on wheel speeds
+arm_lims = [-arm_max, arm_max]          #limits on arm joint speeds
+
+#set time variables
+t = 0                   #initial time
+dt = 0.01               #time step
+
+#pseudo-inverse variables
+r_wheel = 0.0475            #mecanum wheel radius
+w = 0.3/2                   #wheelbase width
+l = 0.47/2                  #body length
+pseudo_mat = np.array([[-1/(l + w), 1/(l + w), 1/(l + w), -1/(l + w)],      #pseudo-inverse for
+                       [1, 1, 1, 1],                                        #twist calculation
+                       [-1, 1, -1, 1]])
+
+#function to determine robot's next configuration
+def NextState(config, wheelspeeds, armspeeds, dt, wheel_lims, arm_lims):
+    chassis_config = config[0:3]                #isolate chassis configuration
+    arm_config = config[3:8]                    #isolate arm configuration
+    wheels_config = config[8:12]                #isolate wheel configurations
+
+    #check if wheel speeds are outside defined limits
+    for i in range(len(wheelspeeds)):           #for all wheels
+        if wheelspeeds[i] < wheel_lims[0]:      #if wheel speed is below lower limit
+            wheelspeeds[i] = wheel_lims[0]      #set equal to lower limit
+        elif wheelspeeds[i] > wheel_lims[1]:    #if wheel speed is above upper limit
+            wheelspeeds[i] = wheel_lims[1]      #set equal to upper limit
+
+    #check if arm joint speeds are outside defined limits
+    for i in range(len(armspeeds)):             #for all arm joints
+        if armspeeds[i] < arm_lims[0]:          #if arm joint speed is below lower limit
+            armspeeds[i] = arm_lims[0]          #set equal to lower limit
+        elif armspeeds[i] > arm_lims[1]:        #if arm joint speed is above upper limit
+            armspeeds[i] = arm_lims[1]          #set equal to upper limit
+
+    #arm joints configuration list
+    arm_config = np.asarray([arm_config[i] + armspeeds[i]*dt for i in range(len(arm_config))])
+
+    #wheel configuration list
+    wheels_config = np.asarray([wheels_config[i] + wheelspeeds[i]*dt for i in range(len(wheels_config))])
+
+    #odometry
+    dtheta = np.zeros(len(wheels_config))           #placeholder zeros vector for wheel rotations
+    for i in range(len(wheelspeeds)):               #for each wheel
+        dtheta[i] = wheelspeeds[i]*dt               #calculate change in wheel angle
+    pseudo_inv = (r_wheel/4)*pseudo_mat             #pseudo-inverse
+    V_b = np.dot(pseudo_inv, dtheta)                #calculate body twist using psuedo-inverse
+
+    #determine coordinate change in body frame
+    if abs(V_b[0]) <= 1e-5:                                 #if angular velocity is zero
+        delta_qb = V_b                              #coordinate change equal to body twist
+    elif abs(V_b[0]) >= 1e-5:                               #if angular velocity non-zero
+        delta_qb = np.zeros((3, 1))                 #placeholder zeros vector
+        delta_qb[0, 0] = V_b[0]                     #angular change equal to angular velocity
+        delta_qb[1, 0] = (V_b[1]*np.sin(V_b[0])+V_b[2]*(np.cos(V_b[0]-1)))/V_b[0]   #x change
+        delta_qb[2, 0] = (V_b[2]*np.sin(V_b[0])+V_b[1]*(1-np.cos(V_b[0])))/V_b[0]   #y change
+
+    #transform coordinate change to fixed frame
+    #rotation matrix from world to body frame = rotation around z-axis
+    rot_mat = np.array([[1, 0, 0],
+                        [0, np.cos(chassis_config[0]), -np.sin(chassis_config[0])],
+                        [0, np.sin(chassis_config[0]), np.cos(chassis_config[0])]])
+    delta_q = np.dot(rot_mat, delta_qb)         #world frame coordinate change
+
+    #update chassis configuration
+    chassis_config = np.add(chassis_config, delta_q)
+
+    #update robot configuration
+    next_config = np.hstack((chassis_config, arm_config))
+    next_config = np.hstack((next_config, wheels_config))
+    config_list = next_config.tolist()              #convert configuration vector to list
+    config_list.append(0)                   #add zero to configuration (gripper state = open)
+
+    return config_list              #output configuration
+
+u = [10, 10, 10, 10]                #wheel speeds
+armspeeds = [1, 1, 1, 1, 1]         #arm joint speeds
+config = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])      #initial configuration (positions)
+init_config = config.tolist()       #convert configuration to list
+
+with open('configurations.csv', mode='w+') as config_file:      #open .csv file writer
+    config_writer = csv.writer(config_file, delimiter=',')
+    config_writer.writerow(init_config)                         #write initial configuration
+    while t <= 1:                       #runtime
+        next_step = NextState(config, u, armspeeds, dt, wheel_lims, arm_lims)   #calculate next configuration
+        config = next_step
+        config_writer.writerow(config)              #write calculated configuration to .csv
+        t += dt                                     #increase timestep

@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+
+#necessary imports
+from __future__ import print_function
+import numpy as np
+import modern_robotics as mr
+
+#function returns end-effector twist
+#arguments: (current e-e config [se(3)], reference e-e config [se(3)],
+#            next reference e-e config [se(3)], Kp [6x6], Ki [6x6], dt [scalar])
+def FeedbackControl(T_se, T_se_d, T_se_next, K_prop, K_int, timestep):
+    #inverse of current end-effector configuration
+    x_inv = mr.TransInv(T_se)
+    #inverse of desired configuration
+    xd_inv = mr.TransInv(T_se_d)
+    #calculate twist V_d moving from Xd to Xd_next
+    v_d = mr.se3ToVec((1/dt)*mr.MatrixLog6(np.dot(xd_inv, T_se_next)))
+    #adjoint of X_inverse*Xd
+    ad_xinv_xd = mr.Adjoint(np.dot(x_inv, X_d))
+    #product of adjoint and twist V_d
+    adv_d = np.dot(ad_xinv_xd, v_d)
+    #error se(3) matrix from X to Xd
+    x_err = mr.MatrixLog6(np.dot(x_inv, X_d))
+    #error twist from X to Xd
+    x_err_twist = mr.se3ToVec(x_err)
+    #output end-effector twist
+    v_t = adv_d + np.dot(K_prop, x_err_twist) + np.dot(K_int, timestep*x_err_twist)
+    return v_t
+
+#function returns pseudoinverse of combined wheels-arm body jacobian
+#arguments: (configuration)
+def JacobianPseudoinverse(config):
+    #arm forward kinematics
+    #CHANGE 3RD ARGUMENT TO BE ARM JOINT ANGLES AT CURRENT CONFIGURATION (I.E. DIFFERENT INDICES)
+    t_0e = mr.FKinBody(M_0e, arm_screws, config[3:])
+    #inverse of arm forward kinematics
+    t_0e_inv = mr.TransInv(t_0e)
+    #adjoint of product of inverses
+    ad_t0einv_tb0inv = mr.Adjoint(np.dot(t_0e_inv, T_b0_inv))
+    #base body jacobian
+    j_base = np.dot(ad_t0einv_tb0inv, F6)
+    #arm body jacobian
+    j_arm = mr.JacobianBody(arm_screws, robot[3:])
+    #total jacobian
+    j_e = np.hstack((j_base, j_arm))
+    #jacobian pseudoinverse
+    j_e_psinv = np.linalg.pinv(j_e)
+    return j_e_psinv
+
+#define constants
+dt = 0.01                   #timestep
+Kp = np.zeros((6, 6))       #proportional gain matrix
+Ki = np.zeros((6, 6))       #integral gain matrix
+r_wheel = 0.0475            #mecanum wheel radius
+w = 0.3/2                   #wheelbase width
+l = 0.47/2                  #body length
+
+#robot configuration: 0-2 = chassis phi, x, y; 3-7 = arm joint angles
+robot = [0, 0, 0, 0, 0, 0.2, -1.6, 0]
+
+#body-frame screw axes for arm
+arm_screws = np.array([[0, 0, 1, 0, 0.033, 0],
+                       [0, -1, 0, -0.5076, 0, 0],
+                       [0, -1, 0, -0.3526, 0, 0],
+                       [0, -1, 0, -0.2176, 0, 0],
+                       [0, 0, 1, 0, 0, 0]]).T
+
+#pseudo-inverse of chassis velocity:wheel velocity mapping matrix
+F = (r_wheel/4)*np.array([[-1/(l+w), 1/(l+w), 1/(l+w), -1/(l+w)],
+                          [1, 1, 1, 1],
+                          [-1, 1, -1, 1]])
+m0 = np.array([0, 0, 0, 0])
+F6 = np.vstack((m0, m0, F, m0))
+#print(F6)
+
+#offset of arm from base frame
+T_b0 = np.array([[1, 0, 0, 0.1662],
+                 [0, 1, 0, 0],
+                 [0, 0, 1, 0.0026],
+                 [0, 0, 0, 1]])
+#inverse
+T_b0_inv = mr.TransInv(T_b0)
+
+#end-effector home configuration
+M_0e = np.array([[1, 0, 0, 0.033],
+                 [0, 1, 0, 0],
+                 [0, 0, 1, 0.6546],
+                 [0, 0, 0, 1]])
+
+#initial end-effector se(3)
+X = np.array([[0.170, 0, 0.985, 0.387],
+              [0, 1, 0, 0],
+              [-0.985, 0, 0.170, 0.570],
+              [0, 0, 0, 1]])
+
+#desired e-e se(3)
+X_d = np.array([[0, 0, 1, 0.5],
+                [0, 1, 0, 0],
+                [-1, 0, 0, 0.5],
+                [0, 0, 0, 1]])
+
+#next desired e-e se(3)
+X_d_next = np.array([[0, 0, 1, 0.6],
+                     [0, 1, 0, 0],
+                     [-1, 0, 0, 0.3],
+                     [0, 0, 0, 1]])
+
+#get twist for current timestep
+twist_curr = FeedbackControl(X, X_d, X_d_next, Kp, Ki, dt)
+
+#jacobian pseudoinverse for current timestep
+J_pi_curr = JacobianPseudoinverse(robot)
+
+#joint velocities
+velocities = np.around(np.dot(J_pi_curr, twist_curr), 1)
+print(velocities)
