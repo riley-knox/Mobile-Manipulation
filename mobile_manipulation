@@ -183,6 +183,29 @@ def NextState(current_config, controls, dt, max_speeds, gripper):
 
     return phid, xd, yd, j1_d, j2_d, j3_d, j4_d, j5_d, w1_d, w2_d, w3_d, w4_d, gripper
 
+#returns jacobians based on current configuration
+def get_Jacobian(phi, x, y, j1, j2, j3, j4, j5):
+    """
+    phi = chassis angle
+    x = chassis x
+    y = chassis y
+    j* = angle of arm joint *
+    """
+    theta_list = np.array([j1, j2, j3, j4, j5])                     #list of arm joint angles
+    T_chassis = np.array([[math.cos(phi), -math.sin(phi), 0, x],    #se(3) of chassis configuration
+                          [math.sin(phi), math.cos(phi), 0, y],
+                          [0, 0, 1, 0.0963],
+                          [0, 0, 0, 1]])
+    J_arm = mr.JacobianBody(arm_screws, theta_list)                     #body jacobian of arm
+
+    T_0e = mr.FKinBody(M_0e, arm_screws, theta_list)                    #end-effector se(3) at current joint angles
+
+    X = np.dot(np.dot(T_chassis, T_b0), T_0e)                           #current end-effector se(3) in world frame
+
+    J_body = np.dot(mr.Adjoint(np.dot(np.linalg.inv(T_0e),T_b0)), F6)   #chassis body jacobian
+
+    return X, J_arm, J_body
+
 """
 def main():
 
