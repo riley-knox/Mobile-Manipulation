@@ -5,6 +5,7 @@ from __future__ import print_function
 import modern_robotics as mr
 import numpy as np
 import math
+from pprint import pprint
 
 #robot geometry
 l = 0.47/2
@@ -21,6 +22,8 @@ F6 = np.vstack((zero_row4, zero_row4, H_pseudo_inv, zero_row4))
 
 #initialize error integral
 err_integral = 0
+#initialize configurations list
+configs = []
 
 #body-frame screw axes, arm joints
 arm_screws = np.array([[0, 0, 1, 0, 0.033, 0],
@@ -43,3 +46,78 @@ T_b0 = np.array([[1, 0, 0, 0.1662],
                  [0, 0, 1, 0.0026],
                  [0, 0, 0, 1]])
 #print(T_b0)
+
+#turn se(3) matrix into configuration vector
+def create_trajectory_vector(config, grip_state):
+    traj_i = []                                                             #empty list
+    traj_i[0:3] = config[0, 0:3]                                            #rotational values
+    traj_i[3:6] = config[1, 0:3]
+    traj_i[6:9] = config[2, 0:3]
+    traj_i.extend([config[0, 3], config[1, 3], config[2, 3], grip_state])   #translational values + grip state
+    return traj_i
+
+#trajectory generator function
+def TrajectoryGenerator(trajectory_times, endpoints, hz):
+    trajpts = []                                #empty list to hold configurations
+    for i in range(len(trajectory_times)):      #determine type of each trajectory
+        traj_start = endpoints[i]               #trajectory start
+        traj_end = endpoints[i+1]               #trajectory end
+
+        #use cartesian trajectory
+        traj_i = mr.CartesianTrajectory(traj_start, traj_end, trajectory_times[i], trajectory_times[i]*hz, 5)
+
+        if 2 <= i <= 5:                         #set grip state to closed for 'holding' trajectories
+            append = 1
+        else:                                   #set grip state to open for others
+            append = 0
+
+        for j in range(len(traj_i)):            #create trajectory vectors across
+            t_j = create_trajectory_vector(traj_i[j], append)
+            trajpts.append(t_j)
+
+    return trajpts
+
+T_se = np.array([[1, 0, 0, 0],          #initial E-E configuration
+                 [0, 1, 0, 0],
+                 [0, 0, 1, 0.5],
+                 [0, 0, 0, 1]])
+
+T_sc_i = np.array([[1, 0, 0, 1],        #initial cube configuration
+                   [0, 1, 0, 0],
+                   [0, 0, 1, 0.025],
+                   [0, 0, 0, 1]])
+
+T_sc_f = np.array([[0, 1, 0, 0],        #final cube configuration
+                   [-1, 0, 0, -1],
+                   [0, 0, 1, 0.025],
+                   [0, 0, 0, 1]])
+
+T_grasp = np.array([[0, 0, 1, 0],       #transformation from cube:E-E when grasping
+                    [0, 1, 0, 0],
+                    [-1, 0, 0, 0],
+                    [0, 0, 0, 1]])
+
+T_standoff = np.array([[0, 0, 1, 0],    #transformation from cube:E-E at standoff
+                       [0, 1, 0, 0],
+                       [-1, 0, 0, 0.05],
+                       [0, 0, 0, 1]])
+
+k = 100                                     #configurations per second
+traj_times = [5, 1, 1, 1, 5, 1, 1, 1]       #trajectory segment times (seconds)
+
+#trajectory endpoints
+t1_start = T_se                                 #segment 1 start (initial config)
+t1_end = np.dot(T_sc_i, T_standoff)             #segment 1 endpoint (initial standoff)
+t2_end = np.dot(T_sc_i, T_grasp)                #segment 2 endpoint (grab cube position)
+t3_end = t2_end                                 #segment 3 endpoint (grab cube position)
+t4_end = t1_end                                 #segment 4 endpoint (initial standoff)
+t5_end = np.dot(T_sc_f, T_standoff)             #segment 5 endpoint (final standoff)
+t6_end = np.dot(T_sc_f, T_grasp)                #segment 6 endpoint (release cube position)
+t7_end = t6_end                                 #segment 7 endpoint (release cube position)
+t8_end = t5_end                                 #segment 8 endpoint (final standoff)
+#create list
+traj_endpoints = [t1_start, t1_end, t2_end, t3_end, t4_end, t5_end, t6_end, t7_end, t8_end]
+
+traj_pts = TrajectoryGenerator(traj_times, traj_endpoints, k)
+
+pprint(traj_pts)
